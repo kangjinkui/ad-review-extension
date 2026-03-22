@@ -7,12 +7,33 @@ import os
 import sys
 import zipfile
 import re
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime, timedelta
 from io import BytesIO
 from xml.sax.saxutils import escape
 from xml.etree import ElementTree as ET
+
+HWP_NS = {
+    'ha': 'http://www.hancom.co.kr/hwpml/2011/app',
+    'hp': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
+    'hp10': 'http://www.hancom.co.kr/hwpml/2016/paragraph',
+    'hs': 'http://www.hancom.co.kr/hwpml/2011/section',
+    'hc': 'http://www.hancom.co.kr/hwpml/2011/core',
+    'hh': 'http://www.hancom.co.kr/hwpml/2011/head',
+    'hhs': 'http://www.hancom.co.kr/hwpml/2011/history',
+    'hm': 'http://www.hancom.co.kr/hwpml/2011/master-page',
+    'hpf': 'http://www.hancom.co.kr/schema/2011/hpf',
+    'dc': 'http://purl.org/dc/elements/1.1/',
+    'opf': 'http://www.idpf.org/2007/opf/',
+    'ooxmlchart': 'http://www.hancom.co.kr/hwpml/2016/ooxmlchart',
+    'hwpunitchar': 'http://www.hancom.co.kr/hwpml/2016/HwpUnitChar',
+    'epub': 'http://www.idpf.org/2007/ops',
+    'config': 'urn:oasis:names:tc:opendocument:xmlns:config:1.0',
+}
+for prefix, uri in HWP_NS.items():
+    ET.register_namespace(prefix, uri)
 
 
 # ─────────────────────────────────────────────
@@ -29,6 +50,11 @@ def resource_path(relative_path):
 
 
 TEMPLATE_DIR = resource_path('templates')
+APP_STATE_PATH = os.path.join(
+    os.environ.get('LOCALAPPDATA', os.path.dirname(os.path.abspath(__file__))),
+    'ad-review-builder',
+    'state.json'
+)
 REQUIRED_HWPX_ENTRIES = [
     'mimetype',
     'version.xml',
@@ -50,10 +76,12 @@ TEMPLATE_MAP = {
     ('연장', '11층 이상 상단'):    '연장_11층이상상단.hwpx',
     ('연장', '돌출간판'):          '연장_돌출간판.hwpx',
     ('연장', '벽면이용간판'):      '연장_벽면이용간판.hwpx',
+    ('내용변경', '공공시설물'):    '내용변경_공공시설물.hwpx',
 }
 
 SHINYU_TYPES = ['입간판', '10층 이하 상단간판', '11층 이상 상단간판', '돌출간판', '벽면이용간판']
 YEONJANG_TYPES = ['10층 이하 상단', '11층 이상 상단', '돌출간판', '벽면이용간판']
+CONTENT_CHANGE_TYPE = '공공시설물'
 
 JIYEOK_OPTIONS = ['상업지역', '주거지역', '준주거지역', '공업지역', '전용주거지역']
 GWANGGO_OPTIONS = ['자사광고', '타사광고']
@@ -128,6 +156,8 @@ def fill_template(template_name: str, values: dict) -> bytes:
                     xml = _replace_multiline_placeholder_paragraphs(
                         xml, '__표시내용__', values.get('표시내용', '')
                     )
+                elif template_name == '내용변경_공공시설물.hwpx':
+                    xml = _fill_content_change_template(xml, values)
                 for key, val in values.items():
                     xml = xml.replace(f'__{key}__', escape(_sanitize_xml_text(val)))
                 data = xml.encode('utf-8')
@@ -157,15 +187,55 @@ def generate_file(mode: str, sign_type: str, values: dict,
     safe_name = re.sub(r'[\\/:*?"<>|]', '_', folder_name)
     if mode == '신규':
         prefix = '심의검토서'
+        filename = f'{prefix}({sign_type})_{safe_name}.hwpx'
+    elif mode == '내용변경':
+        prefix = '공공시설물내용변경검토서'
+        filename = f'{prefix}_{safe_name}.hwpx'
     else:
         prefix = '검토서및허가증'
-    filename = f'{prefix}({sign_type})_{safe_name}.hwpx'
+        filename = f'{prefix}({sign_type})_{safe_name}.hwpx'
     out_path = os.path.join(target_dir, filename)
 
     with open(out_path, 'wb') as f:
         f.write(hwpx_bytes)
 
     return out_path
+
+
+def load_app_state() -> dict:
+    try:
+        with open(APP_STATE_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_app_state(state: dict):
+    try:
+        os.makedirs(os.path.dirname(APP_STATE_PATH), exist_ok=True)
+        with open(APP_STATE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_last_output_dir() -> str:
+    value = load_app_state().get('last_output_dir', '')
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ''
+
+
+def set_last_output_dir(path: str):
+    path = (path or '').strip()
+    if not path:
+        return
+    state = load_app_state()
+    state['last_output_dir'] = path
+    save_app_state(state)
 
 
 # ─────────────────────────────────────────────
@@ -194,9 +264,11 @@ class AdReviewApp(tk.Tk):
 
         self.tab_shinyu = ShinYuTab(nb)
         self.tab_yeonjang = YeonjangTab(nb)
+        self.tab_content_change = ContentChangeTab(nb)
 
         nb.add(self.tab_shinyu,   text='  신규 심의 검토서  ')
         nb.add(self.tab_yeonjang, text='  연장 검토서 및 허가증  ')
+        nb.add(self.tab_content_change, text='  내용변경  ')
 
 
 # ─────────────────────────────────────────────
@@ -210,6 +282,7 @@ class BaseTab(ttk.Frame):
         super().__init__(parent, padding=10)
         self.mode = mode
         self._vars = {}
+        self._text_widgets = {}
         self._build()
 
     def _lf(self, parent, text):
@@ -255,7 +328,16 @@ class BaseTab(ttk.Frame):
                      state='readonly', width=18).grid(
             row=row, column=col*2+1, sticky='ew', **self.PADDING)
 
+    def _add_text_row(self, parent, label, row, key, height=3, width=40):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky='ne', **self.PADDING)
+        text = tk.Text(parent, width=width, height=height, font=('Malgun Gothic', 9))
+        _bind_korean_ime(text)
+        text.grid(row=row, column=1, columnspan=3, sticky='ew', **self.PADDING)
+        self._text_widgets[key] = text
+
     def _get(self, key):
+        if key in self._text_widgets:
+            return self._text_widgets[key].get('1.0', 'end-1c').strip()
         return self._vars[key].get().strip()
 
     def _build(self):
@@ -265,9 +347,23 @@ class BaseTab(ttk.Frame):
         folder = filedialog.askdirectory(title='출력 폴더 선택')
         if folder:
             var.set(folder)
+            set_last_output_dir(folder)
 
     def _on_generate(self):
         raise NotImplementedError
+
+    def _create_output_dir_var(self):
+        return tk.StringVar(value=get_last_output_dir())
+
+    def _get_or_ask_dir(self):
+        d = self.out_dir_var.get().strip()
+        if not d:
+            d = filedialog.askdirectory(title='출력 폴더 선택')
+            if d:
+                self.out_dir_var.set(d)
+        if d:
+            set_last_output_dir(d)
+        return d
 
     def _show_success(self, path):
         if messagebox.askyesno(
@@ -346,7 +442,7 @@ class ShinYuTab(BaseTab):
         lf_out.columnconfigure(1, weight=1)
 
         ttk.Label(lf_out, text='출력 폴더 *').grid(row=0, column=0, sticky='e', **self.PADDING)
-        self.out_dir_var = tk.StringVar()
+        self.out_dir_var = self._create_output_dir_var()
         out_entry = ttk.Entry(lf_out, textvariable=self.out_dir_var, width=38)
         _bind_korean_ime(out_entry)
         out_entry.grid(row=0, column=1, sticky='ew', **self.PADDING)
@@ -405,15 +501,6 @@ class ShinYuTab(BaseTab):
             self._show_success(out)
         except Exception as e:
             messagebox.showerror('오류', f'파일 생성 중 오류가 발생했습니다.\n\n{e}')
-
-    def _get_or_ask_dir(self):
-        d = self.out_dir_var.get().strip()
-        if not d:
-            d = filedialog.askdirectory(title='출력 폴더 선택')
-            if d:
-                self.out_dir_var.set(d)
-        return d
-
 
 # ─────────────────────────────────────────────
 # 연장 탭
@@ -516,7 +603,7 @@ class YeonjangTab(BaseTab):
         lf_out.columnconfigure(1, weight=1)
 
         ttk.Label(lf_out, text='출력 폴더 *').grid(row=0, column=0, sticky='e', **self.PADDING)
-        self.out_dir_var = tk.StringVar()
+        self.out_dir_var = self._create_output_dir_var()
         out_entry = ttk.Entry(lf_out, textvariable=self.out_dir_var, width=38)
         _bind_korean_ime(out_entry)
         out_entry.grid(row=0, column=1, sticky='ew', **self.PADDING)
@@ -575,14 +662,88 @@ class YeonjangTab(BaseTab):
         except Exception as e:
             messagebox.showerror('오류', f'파일 생성 중 오류가 발생했습니다.\n\n{e}')
 
-    def _get_or_ask_dir(self):
-        d = self.out_dir_var.get().strip()
-        if not d:
-            d = filedialog.askdirectory(title='출력 폴더 선택')
-            if d:
-                self.out_dir_var.set(d)
-        return d
+# ─────────────────────────────────────────────
+# 내용변경 탭
+# ─────────────────────────────────────────────
 
+class ContentChangeTab(BaseTab):
+    def __init__(self, parent):
+        super().__init__(parent, mode='내용변경')
+
+    def _build(self):
+        lf_type = self._lf(self, '서식')
+        lf_type.pack(fill='x', pady=(0, 6))
+        ttk.Label(
+            lf_type,
+            text='공공시설물(지상변압기함) 내용변경 검토서',
+        ).grid(row=0, column=0, sticky='w', padx=8, pady=6)
+
+        lf_info = self._lf(self, '광고물 내역')
+        lf_info.pack(fill='x', pady=(0, 6))
+        lf_info.columnconfigure(1, weight=1)
+        lf_info.columnconfigure(3, weight=1)
+
+        self._add_entry_row(lf_info, '광고주 *', 0, '광고주')
+        self._add_text_row(lf_info, '표시 위치 *', 1, '표시위치', height=3)
+        self._add_text_row(lf_info, '표시 내용 *', 2, '표시내용', height=4)
+
+        ttk.Label(lf_info, text='규격 (M) *').grid(row=3, column=0, sticky='e', **self.PADDING)
+        self._vars['규격'] = tk.StringVar()
+        ent_size = ttk.Entry(lf_info, textvariable=self._vars['규격'], width=16)
+        _bind_korean_ime(ent_size)
+        ent_size.grid(row=3, column=1, sticky='ew', **self.PADDING)
+        ttk.Label(lf_info, text='수량 *').grid(row=3, column=2, sticky='e', **self.PADDING)
+        self._vars['수량'] = tk.StringVar(value='1')
+        ent_count = ttk.Entry(lf_info, textvariable=self._vars['수량'], width=6)
+        _bind_korean_ime(ent_count)
+        ent_count.grid(row=3, column=3, sticky='w', **self.PADDING)
+
+        lf_author = self._lf(self, '검토자')
+        lf_author.pack(fill='x', pady=(0, 6))
+        self._add_entry_row(lf_author, '검토자', 0, '검토자', default='', width=20)
+
+        lf_out = self._lf(self, '출력 설정')
+        lf_out.pack(fill='x', pady=(0, 8))
+        lf_out.columnconfigure(1, weight=1)
+
+        ttk.Label(lf_out, text='출력 폴더 *').grid(row=0, column=0, sticky='e', **self.PADDING)
+        self.out_dir_var = self._create_output_dir_var()
+        out_entry = ttk.Entry(lf_out, textvariable=self.out_dir_var, width=38)
+        _bind_korean_ime(out_entry)
+        out_entry.grid(row=0, column=1, sticky='ew', **self.PADDING)
+        ttk.Button(lf_out, text='찾아보기',
+                   command=lambda: self._select_folder(self.out_dir_var)).grid(
+            row=0, column=2, padx=4, pady=4)
+
+        ttk.Button(self, text='📄  파일 생성', style='Accent.TButton',
+                   command=self._on_generate).pack(pady=6, ipadx=20, ipady=6)
+
+    def _on_generate(self):
+        out_dir = self._get_or_ask_dir()
+        if not out_dir:
+            return
+
+        required = ['광고주', '표시위치', '표시내용', '규격', '수량']
+        for key in required:
+            if not self._get(key):
+                messagebox.showwarning('입력 오류', f'{key}을(를) 입력해주세요.')
+                return
+
+        values = {
+            '광고주': self._get('광고주'),
+            '표시위치': self._get('표시위치'),
+            '표시내용': self._get('표시내용'),
+            '규격': self._get('규격'),
+            '수량': self._get('수량'),
+            '검토자': self._get('검토자'),
+        }
+
+        folder_name = self._get('광고주')
+        try:
+            out = generate_file('내용변경', CONTENT_CHANGE_TYPE, values, out_dir, folder_name)
+            self._show_success(out)
+        except Exception as e:
+            messagebox.showerror('오류', f'파일 생성 중 오류가 발생했습니다.\n\n{e}')
 
 # ─────────────────────────────────────────────
 # 유틸리티
@@ -682,6 +843,109 @@ def _replace_multiline_placeholder_paragraphs(xml: str, placeholder: str, value:
         )
 
     return xml[:match.start()] + ''.join(paragraphs) + xml[match.end():]
+
+
+def _fill_content_change_template(xml: str, values: dict) -> str:
+    root = ET.fromstring(xml)
+    _replace_table_cell_text(root, 1, 1, values.get('광고주', ''))
+    _replace_table_cell_text(root, 2, 1, values.get('표시위치', ''))
+    _replace_table_cell_text(root, 3, 1, values.get('표시내용', ''))
+    _replace_table_cell_text(root, 4, 1, values.get('규격', ''))
+    _replace_table_cell_text(root, 5, 1, values.get('수량', ''))
+    _set_content_change_opinion(
+        root,
+        '해당 광고물은 옥외광고물 관련 법령에 따른 기준에 적합하며, 표시 내용 또한 적합함.'
+    )
+
+    reviewer = _sanitize_xml_text(values.get('검토자', '').strip())
+    for text_node in root.findall('.//hp:t', HWP_NS):
+        if text_node.text == '[검토자 : ]':
+            text_node.text = f'[검토자 : {reviewer}]'
+            break
+
+    return ET.tostring(root, encoding='unicode')
+
+
+def _replace_table_cell_text(root, col: int, row: int, value: str):
+    target_cell = None
+    for cell in root.findall('.//hp:tc', HWP_NS):
+        addr = cell.find('hp:cellAddr', HWP_NS)
+        if addr is None:
+            continue
+        if addr.get('colAddr') == str(col) and addr.get('rowAddr') == str(row):
+            target_cell = cell
+            break
+    if target_cell is None:
+        return
+
+    sublist = target_cell.find('hp:subList', HWP_NS)
+    if sublist is None:
+        return
+    first_paragraph = sublist.find('hp:p', HWP_NS)
+    if first_paragraph is None:
+        return
+
+    first_run = first_paragraph.find('hp:run', HWP_NS)
+    line_seg = first_paragraph.find('hp:linesegarray/hp:lineseg', HWP_NS)
+    if first_run is None or line_seg is None:
+        return
+
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if not lines:
+        lines = ['']
+
+    try:
+        line_step = int(line_seg.get('vertsize', '1100')) + int(line_seg.get('spacing', '276'))
+    except ValueError:
+        line_step = 1376
+
+    line_attrs = dict(line_seg.attrib)
+    base_vertpos = int(line_attrs.get('vertpos', '0'))
+    paragraph_attrs = dict(first_paragraph.attrib)
+    char_id = first_run.get('charPrIDRef', '26')
+
+    for child in list(sublist):
+        sublist.remove(child)
+
+    for idx, line in enumerate(lines):
+        para_attrs = dict(paragraph_attrs)
+        if idx > 0:
+            para_attrs['id'] = '0'
+        paragraph = ET.SubElement(sublist, _hp_tag('p'), para_attrs)
+        run = ET.SubElement(paragraph, _hp_tag('run'), {'charPrIDRef': char_id})
+        if line:
+            text = ET.SubElement(run, _hp_tag('t'))
+            text.text = _sanitize_xml_text(line)
+
+        linesegarray = ET.SubElement(paragraph, _hp_tag('linesegarray'))
+        current_line_attrs = dict(line_attrs)
+        current_line_attrs['vertpos'] = str(base_vertpos + idx * line_step)
+        ET.SubElement(linesegarray, _hp_tag('lineseg'), current_line_attrs)
+
+
+def _set_content_change_opinion(root, text: str):
+    paragraphs = root.findall('.//hp:p', HWP_NS)
+    for idx, paragraph in enumerate(paragraphs):
+        text_nodes = paragraph.findall('.//hp:t', HWP_NS)
+        if ''.join(node.text or '' for node in text_nodes).strip() != '□ 검토 의견':
+            continue
+        if idx + 1 >= len(paragraphs):
+            return
+
+        target = paragraphs[idx + 1]
+        run = target.find('hp:run', HWP_NS)
+        if run is None:
+            return
+
+        for child in list(run):
+            run.remove(child)
+        opinion = ET.SubElement(run, _hp_tag('t'))
+        opinion.text = _sanitize_xml_text(text)
+        return
+
+
+def _hp_tag(local_name: str) -> str:
+    return f'{{{HWP_NS["hp"]}}}{local_name}'
 
 
 def apply_style(root):
