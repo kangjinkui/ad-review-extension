@@ -1,0 +1,14 @@
+.bkit/
+.claude/
+.git/
+
+ad_review_app/build/
+ad_review_app/dist/
+ad_review_app/__pycache__/
+ad_review_app/*.pyc
+
+강남구청/
+소심의 전(신규)/
+연장 검토서/
+
+/*.hwpx
